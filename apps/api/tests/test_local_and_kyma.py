@@ -157,6 +157,48 @@ def test_kyma_retries_altered_evidence_without_saving_it():
     assert requests[0]["max_tokens"] == 6000
 
 
+@pytest.mark.parametrize("always_truncated", [False, True])
+def test_kyma_expands_output_budget_only_for_truncation(always_truncated):
+    budgets = []
+
+    def create(**kwargs):
+        budgets.append(kwargs["max_tokens"])
+        assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+        truncated = always_truncated or len(budgets) == 1
+        content = {
+            "overview": "Synthetic lecture notes.",
+            "key_points": [],
+            "topics": [],
+            "decisions": [],
+            "action_items": [],
+            "open_questions": [],
+        }
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="length" if truncated else "stop",
+                    message=SimpleNamespace(content=json.dumps(content), refusal=None),
+                )
+            ]
+        )
+
+    summarizer = summarization.KymaSummarizer.__new__(summarization.KymaSummarizer)
+    summarizer.model = "deepseek-synthetic"
+    summarizer.check_active = None
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    if always_truncated:
+        with pytest.raises(summarization.SummaryError) as error:
+            summarizer._request("synthetic transcript", set(), "instructions")
+        assert error.value.code == "SUMMARY_OUTPUT_LIMIT"
+        assert not error.value.transient
+        assert budgets == [6000, 12000, 24000]
+    else:
+        assert summarizer._request("synthetic transcript", set(), "instructions").overview
+        assert budgets == [6000, 12000]
+
+
 def test_cohere_local_uses_selected_model_and_loopback(monkeypatch, tmp_path):
     monkeypatch.setattr(
         transcription,

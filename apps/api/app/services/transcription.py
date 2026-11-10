@@ -42,6 +42,16 @@ class OpenAITranscriber:
         except (RateLimitError, APITimeoutError, APIConnectionError) as exc:
             raise TranscriptionError("STT_TEMPORARY", transient=True) from exc
         except APIStatusError as exc:
+            # Kyma returns a 422 for silent/no-speech audio. Preserve the minute
+            # as an empty transcript segment so one quiet interval does not stop
+            # processing the rest of a recording.
+            body = getattr(exc, "body", None)
+            if (
+                self.provider == "kyma"
+                and isinstance(body, dict)
+                and body.get("code") == "no_speech_detected"
+            ):
+                return ""
             raise TranscriptionError(
                 "STT_TEMPORARY" if exc.status_code >= 500 else "STT_REJECTED",
                 transient=exc.status_code >= 500,

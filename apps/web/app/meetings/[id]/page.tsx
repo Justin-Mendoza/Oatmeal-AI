@@ -46,6 +46,11 @@ export default function MeetingDetail() {
   }
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
+  const [retryMessage, setRetryMessage] = useState("");
+  const [retrying, setRetrying] = useState(false);
+  useEffect(() => {
+    if (detail?.meeting.status === "failed") setRetryMessage("");
+  }, [detail?.meeting.status]);
   const editingRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -75,7 +80,7 @@ export default function MeetingDetail() {
       if (!editingRef.current) setTitle(next.meeting.title);
       setMessage("");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not load this class recording.");
+      setMessage(error instanceof TypeError ? "Lost connection to the local app. Processing status may be out of date. Reopen Start Class Notes.command if the app has stopped." : error instanceof Error ? error.message : "Could not load this class recording.");
     }
   }, [id]);
 
@@ -105,19 +110,24 @@ export default function MeetingDetail() {
   }
 
   async function retry() {
+    if (retrying) return;
+    setRetrying(true);
+    setRetryMessage("Queuing processing…");
     try {
       const response = await fetch(`${apiUrl}/v1/meetings/${id}/retry`, {
         method: "POST",
       });
       if (!response.ok) {
         const payload = await response.json();
-        setMessage(payload.error?.message || "This job cannot be retried.");
+        setRetryMessage(payload.error?.message || "This job cannot be retried.");
         return;
       }
-      setMessage("Processing queued again.");
+      setRetryMessage("Processing queued again.");
       await load();
     } catch {
-      setMessage("Could not retry processing. Check your connection and try again.");
+      setRetryMessage("Could not retry processing. Check your connection and try again.");
+    } finally {
+      setRetrying(false);
     }
   }
 
@@ -239,7 +249,8 @@ export default function MeetingDetail() {
           </form>
           <p className="mt-3 text-sm text-slate-600">{meetingDate}{detail.meeting.duration_ms ? ` · ${Math.round(detail.meeting.duration_ms / 60000)} min` : ""}</p>
           <button className="mt-3 text-sm text-red-700 underline" onClick={() => void deleteMeeting()}>Delete recording</button>
-          <div role="status" aria-live="polite" className="mt-8 rounded-xl border border-teal-200 bg-teal-50 p-5"><strong className="capitalize">{detail.meeting.status}</strong><p className="mt-2 text-sm">{detail.meeting.status === "queued" ? "Your recording is saved and waiting to be transcribed." : detail.meeting.status === "draft" ? "This class has no uploaded recording yet." : detail.meeting.status === "uploading" ? "The recording is uploading. Keep the recording tab open." : detail.meeting.status === "failed" ? `Processing failed${detail.job?.last_error_code ? ` (${detail.job.last_error_code})` : ""}. Your previous study guide remains available if you were refreshing it.` : detail.meeting.status === "summarizing" ? detail.has_summary ? "Your study guide is being refreshed. The previous version remains below." : "The transcript is saved. Your study guide is being prepared." : detail.meeting.status === "ready" ? "Your transcript and study guide are ready to review." : "Your recording is being processed."}</p>{detail.meeting.status === "failed" && <button className="mt-4 rounded bg-teal-800 px-4 py-2 text-white" onClick={() => void retry()}>Retry processing</button>}</div>
+          {message && <p className="mt-5" role="alert">{message}</p>}
+          <div role="status" aria-live="polite" className="mt-8 rounded-xl border border-teal-200 bg-teal-50 p-5"><strong className="capitalize">{detail.meeting.status}</strong><p className="mt-2 text-sm">{detail.meeting.status === "queued" ? "Your recording is saved and waiting to be transcribed." : detail.meeting.status === "draft" ? "This class has no uploaded recording yet." : detail.meeting.status === "uploading" ? "The recording is uploading. Keep the recording tab open." : detail.meeting.status === "failed" ? detail.job?.last_error_code === "WORKER_STOPPED" ? "Processing stopped because the local worker closed. Your transcript is saved. Retry processing to resume study notes." : `Processing failed${detail.job?.last_error_code ? ` (${detail.job.last_error_code})` : ""}. Your previous study guide remains available if you were refreshing it.` : detail.meeting.status === "summarizing" ? detail.has_summary ? "Your study guide is being refreshed. The previous version remains below." : "The transcript is saved. Your study guide is being prepared." : detail.meeting.status === "ready" ? "Your transcript and study guide are ready to review." : "Your recording is being processed."}</p>{detail.meeting.status === "failed" && <button className="mt-4 rounded bg-teal-800 px-4 py-2 text-white disabled:opacity-50" disabled={retrying} onClick={() => void retry()}>{retrying ? "Queuing…" : "Retry processing"}</button>}{retryMessage && <p className="mt-3 text-sm" role="status">{retryMessage}</p>}</div>
           {detail.meeting.status === "transcribing" && (
             <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50 p-5">
               {detail.meeting.duration_ms && detail.meeting.duration_ms > 0 ? (
@@ -281,7 +292,7 @@ export default function MeetingDetail() {
           <section className="mt-10 rounded-2xl bg-white p-7 shadow-sm"><h2 className="text-2xl font-semibold">Class transcript</h2>{transcript ? <><div className="mt-4 flex flex-wrap gap-3"><button className="rounded border border-teal-800 px-4 py-2 text-teal-800" onClick={() => void navigator.clipboard.writeText(transcript.full_text)}>Copy transcript</button><button className="rounded border border-teal-800 px-4 py-2 text-teal-800" onClick={downloadTranscript}>Download .txt</button></div><ol className="mt-6 space-y-5">{transcript.segments.map((segment) => <li id={`segment-${segment.id}`} key={segment.id} className="border-t border-slate-200 pt-4"><span className="text-sm text-slate-500">~{Math.floor(segment.start_ms / 60000)}–{Math.ceil(segment.end_ms / 60000)} min</span><p className="mt-2 whitespace-pre-wrap">{segment.text || "[No speech detected in this chunk]"}</p></li>)}</ol></> : <p className="mt-3 text-slate-600">Your transcript will appear after transcription finishes.</p>}</section>
         </>
       )}
-      {message && <p className="mt-5" role="status" aria-live="polite">{message}</p>}
+
     </main>
   );
 }

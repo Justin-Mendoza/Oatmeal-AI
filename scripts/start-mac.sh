@@ -6,6 +6,9 @@ umask 077
 mkdir -p .data
 chmod 700 .data
 
+background=false
+if [[ "${1:-}" == "--background" ]]; then background=true; fi
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker Desktop is required. Install it, then try again." >&2
   exit 1
@@ -43,10 +46,17 @@ if [[ -f .data/dev.pid ]]; then
   fi
 fi
 if [[ -z "$dev_pid" ]]; then
-  bash scripts/dev.sh &
+  if [[ "$background" == true ]]; then
+    nohup bash scripts/dev.sh >> .data/services.log 2>&1 < /dev/null &
+  else
+    bash scripts/dev.sh &
+  fi
   dev_pid=$!
   own_process=true
-  trap 'kill -TERM "$dev_pid" 2>/dev/null || true' EXIT INT TERM
+  # Keep services attached to the traditional Terminal launcher only.
+  if [[ "$background" == false ]]; then
+    trap 'kill -TERM "$dev_pid" 2>/dev/null || true' EXIT INT TERM
+  fi
   echo "Starting Oatmeal AI..."
 fi
 for _ in {1..120}; do
@@ -58,7 +68,7 @@ for _ in {1..120}; do
     && curl --silent --fail http://127.0.0.1:8000/readyz >/dev/null; then
     echo "Oatmeal AI is ready."
     open http://localhost:3000
-    if [[ "$own_process" == true ]]; then
+    if [[ "$own_process" == true && "$background" == false ]]; then
       echo "Keep this window open while using the app, or use Stop Class Notes.command."
       wait "$dev_pid"
     fi

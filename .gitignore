@@ -13,5 +13,6 @@ node_modules/
 .next/
 *.tsbuildinfo
 .DS_Store
+Oatmeal AI.app/
 .venv-cohere/
 .venv-cohere-speech/

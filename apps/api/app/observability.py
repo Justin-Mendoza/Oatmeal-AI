@@ -16,6 +16,7 @@ class JsonFormatter(logging.Formatter):
         "attempt",
         "error_code",
         "status_code",
+        "finish_reason",
     )
 
     def format(self, record: logging.LogRecord) -> str:
