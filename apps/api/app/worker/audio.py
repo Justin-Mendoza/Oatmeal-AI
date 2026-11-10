@@ -45,6 +45,12 @@ def split_audio(
             "-i",
             str(source),
             "-vn",
+            # Preserve gaps in browser recording timestamps. Without this,
+            # normalization shortens the audio and later chunks are empty files.
+            "-af",
+            "aresample=async=1:first_pts=0,apad",
+            "-t",
+            f"{duration_ms / 1000:.3f}",
             "-ac",
             "1",
             "-ar",

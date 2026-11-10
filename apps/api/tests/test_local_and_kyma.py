@@ -157,6 +157,48 @@ def test_kyma_retries_altered_evidence_without_saving_it():
     assert requests[0]["max_tokens"] == 6000
 
 
+@pytest.mark.parametrize("always_truncated", [False, True])
+def test_kyma_expands_output_budget_only_for_truncation(always_truncated):
+    budgets = []
+
+    def create(**kwargs):
+        budgets.append(kwargs["max_tokens"])
+        assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+        truncated = always_truncated or len(budgets) == 1
+        content = {
+            "overview": "Synthetic lecture notes.",
+            "key_points": [],
+            "topics": [],
+            "decisions": [],
+            "action_items": [],
+            "open_questions": [],
+        }
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="length" if truncated else "stop",
+                    message=SimpleNamespace(content=json.dumps(content), refusal=None),
+                )
+            ]
+        )
+
+    summarizer = summarization.KymaSummarizer.__new__(summarization.KymaSummarizer)
+    summarizer.model = "deepseek-synthetic"
+    summarizer.check_active = None
+    summarizer.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    if always_truncated:
+        with pytest.raises(summarization.SummaryError) as error:
+            summarizer._request("synthetic transcript", set(), "instructions")
+        assert error.value.code == "SUMMARY_OUTPUT_LIMIT"
+        assert not error.value.transient
+        assert budgets == [6000, 12000, 24000]
+    else:
+        assert summarizer._request("synthetic transcript", set(), "instructions").overview
+        assert budgets == [6000, 12000]
+
+
 def test_cohere_local_uses_selected_model_and_loopback(monkeypatch, tmp_path):
     monkeypatch.setattr(
         transcription,
@@ -201,3 +243,86 @@ def test_cohere_local_rejects_unsafe_urls(monkeypatch, url):
     with pytest.raises(transcription.TranscriptionError) as error:
         transcription.CohereLocalTranscriber()
     assert error.value.code == "LOCAL_STT_URL_INVALID"
+
+
+def test_kyma_transcription_uses_shared_key_and_selected_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        transcription,
+        "settings",
+        SimpleNamespace(
+            stt_provider="kyma",
+            kyma_api_key="test-kyma-key",
+            kyma_base_url="https://kymaapi.com/v1",
+            kyma_transcription_model="gpt-transcribe",
+        ),
+    )
+    requests = []
+    real_client = OpenAI
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"text": "  A binary search tree.  "})
+
+    def client(**kwargs):
+        return real_client(
+            **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(handle))
+        )
+
+    monkeypatch.setattr(transcription, "OpenAI", client)
+    transcriber = transcription.create_transcriber()
+    audio = tmp_path / "chunk_0000.mp3"
+    audio.write_bytes(b"synthetic audio")
+    assert transcriber.transcribe(audio) == "A binary search tree."
+    assert transcriber.provider == "kyma"
+    assert transcriber.model == "gpt-transcribe"
+    assert str(requests[0].url) == "https://kymaapi.com/v1/audio/transcriptions"
+    assert requests[0].headers["authorization"] == "Bearer test-kyma-key"
+    assert b"gpt-transcribe" in requests[0].content
+    assert b"synthetic audio" in requests[0].content
+
+
+@pytest.mark.parametrize(
+    "key,url,code",
+    [
+        ("", "https://kymaapi.com/v1", "PROVIDER_UNAVAILABLE"),
+        ("your-server-only-key", "https://kymaapi.com/v1", "PROVIDER_UNAVAILABLE"),
+        ("test-key", "http://example.com/v1", "KYMA_URL_INVALID"),
+    ],
+)
+def test_kyma_transcription_rejects_missing_key_and_wrong_endpoint(monkeypatch, key, url, code):
+    monkeypatch.setattr(
+        transcription,
+        "settings",
+        SimpleNamespace(
+            kyma_api_key=key,
+            kyma_base_url=url,
+        ),
+    )
+    with pytest.raises(transcription.TranscriptionError) as error:
+        transcription.KymaTranscriber()
+    assert error.value.code == code
+    assert not error.value.transient
+
+
+@pytest.mark.parametrize("status,transient", [(401, False), (429, True), (500, True)])
+def test_kyma_transcription_preserves_retry_policy(tmp_path, status, transient):
+    transcriber = transcription.KymaTranscriber.__new__(transcription.KymaTranscriber)
+    transcriber.model = "gpt-transcribe"
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(status, json={"error": {"message": "simulated failure"}})
+
+    transcriber.client = OpenAI(
+        base_url="https://kymaapi.com/v1",
+        api_key="test-key",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    audio = tmp_path / "chunk_0000.mp3"
+    audio.write_bytes(b"synthetic audio")
+    with pytest.raises(transcription.TranscriptionError) as error:
+        transcriber.transcribe(audio)
+    assert error.value.transient is transient
+    assert len(requests) == 1

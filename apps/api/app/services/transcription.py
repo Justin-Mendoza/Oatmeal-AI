@@ -42,10 +42,39 @@ class OpenAITranscriber:
         except (RateLimitError, APITimeoutError, APIConnectionError) as exc:
             raise TranscriptionError("STT_TEMPORARY", transient=True) from exc
         except APIStatusError as exc:
+            # Kyma returns a 422 for silent/no-speech audio. Preserve the minute
+            # as an empty transcript segment so one quiet interval does not stop
+            # processing the rest of a recording.
+            body = getattr(exc, "body", None)
+            if (
+                self.provider == "kyma"
+                and isinstance(body, dict)
+                and body.get("code") == "no_speech_detected"
+            ):
+                return ""
             raise TranscriptionError(
                 "STT_TEMPORARY" if exc.status_code >= 500 else "STT_REJECTED",
                 transient=exc.status_code >= 500,
             ) from exc
+
+
+class KymaTranscriber(OpenAITranscriber):
+    """Use Kyma's OpenAI-compatible file transcription endpoint."""
+
+    provider = "kyma"
+
+    def __init__(self):
+        if not settings.kyma_api_key or settings.kyma_api_key == "your-server-only-key":
+            raise TranscriptionError("PROVIDER_UNAVAILABLE", transient=False)
+        if settings.kyma_base_url != "https://kymaapi.com/v1":
+            raise TranscriptionError("KYMA_URL_INVALID", transient=False)
+        self.model = settings.kyma_transcription_model
+        self.client = OpenAI(
+            base_url=settings.kyma_base_url,
+            api_key=settings.kyma_api_key,
+            timeout=180,
+            max_retries=0,
+        )
 
 
 class WhisperLocalTranscriber(OpenAITranscriber):
@@ -103,6 +132,8 @@ class CohereLocalTranscriber(OpenAITranscriber):
 
 
 def create_transcriber() -> Transcriber:
+    if settings.stt_provider == "kyma":
+        return KymaTranscriber()
     if settings.stt_provider == "cohere_local":
         return CohereLocalTranscriber()
     if settings.stt_provider == "openai":
